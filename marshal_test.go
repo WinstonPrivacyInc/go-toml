@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -145,8 +146,8 @@ var docData = testDoc{
 		Second: &subdoc,
 	},
 	SubDocList: []testSubDoc{
-		testSubDoc{"List.First", 0},
-		testSubDoc{"List.Second", 0},
+		{"List.First", 0},
+		{"List.Second", 0},
 	},
 	SubDocPtrs: []*testSubDoc{&subdoc},
 }
@@ -175,25 +176,6 @@ func TestDocUnmarshal(t *testing.T) {
 		expStr, _ := json.MarshalIndent(expected, "", "  ")
 		t.Errorf("Bad unmarshal: expected\n-----\n%s\n-----\ngot\n-----\n%s\n-----\n", expStr, resStr)
 	}
-}
-
-func ExampleUnmarshal() {
-	type Postgres struct {
-		User     string
-		Password string
-	}
-	type Config struct {
-		Postgres Postgres
-	}
-
-	doc := []byte(`
-	[postgres]
-	user = "pelletier"
-	password = "mypassword"`)
-
-	config := Config{}
-	Unmarshal(doc, &config)
-	fmt.Println("user=", config.Postgres.User)
 }
 
 func TestDocPartialUnmarshal(t *testing.T) {
@@ -527,6 +509,14 @@ func TestPointerUnmarshal(t *testing.T) {
 	}
 }
 
+func TestUnmarshalTypeMismatch(t *testing.T) {
+	result := pointerMarshalTestStruct{}
+	err := Unmarshal([]byte("List = 123"), &result)
+	if !strings.HasPrefix(err.Error(), "(1, 1): Can't convert 123(int64) to []string(slice)") {
+		t.Errorf("Type mismatch must be reported: got %v", err.Error())
+	}
+}
+
 type nestedMarshalTestStruct struct {
 	String [][]string
 	//Struct [][]basicMarshalTestSubStruct
@@ -540,7 +530,7 @@ var strPtr = []*string{&str1, &str2}
 var strPtr2 = []*[]*string{&strPtr}
 
 var nestedTestData = nestedMarshalTestStruct{
-	String:    [][]string{[]string{"Five", "Six"}, []string{"One", "Two"}},
+	String:    [][]string{{"Five", "Six"}, {"One", "Two"}},
 	StringPtr: &strPtr2,
 }
 
@@ -615,5 +605,400 @@ func TestNestedCustomMarshaler(t *testing.T) {
 	expected := nestedCustomMarshalerToml
 	if !bytes.Equal(result, expected) {
 		t.Errorf("Bad nested custom marshaler: expected\n-----\n%s\n-----\ngot\n-----\n%s\n-----\n", expected, result)
+	}
+}
+
+var commentTestToml = []byte(`
+# it's a comment on type
+[postgres]
+  # isCommented = "dvalue"
+  noComment = "cvalue"
+
+  # A comment on AttrB with a
+  # break line
+  password = "bvalue"
+
+  # A comment on AttrA
+  user = "avalue"
+
+  [[postgres.My]]
+
+    # a comment on my on typeC
+    My = "Foo"
+
+  [[postgres.My]]
+
+    # a comment on my on typeC
+    My = "Baar"
+`)
+
+func TestMarshalComment(t *testing.T) {
+	type TypeC struct {
+		My string `comment:"a comment on my on typeC"`
+	}
+	type TypeB struct {
+		AttrA string `toml:"user" comment:"A comment on AttrA"`
+		AttrB string `toml:"password" comment:"A comment on AttrB with a\n break line"`
+		AttrC string `toml:"noComment"`
+		AttrD string `toml:"isCommented" commented:"true"`
+		My    []TypeC
+	}
+	type TypeA struct {
+		TypeB TypeB `toml:"postgres" comment:"it's a comment on type"`
+	}
+
+	ta := []TypeC{{My: "Foo"}, {My: "Baar"}}
+	config := TypeA{TypeB{AttrA: "avalue", AttrB: "bvalue", AttrC: "cvalue", AttrD: "dvalue", My: ta}}
+	result, err := Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := commentTestToml
+	if !bytes.Equal(result, expected) {
+		t.Errorf("Bad marshal: expected\n-----\n%s\n-----\ngot\n-----\n%s\n-----\n", expected, result)
+	}
+}
+
+type mapsTestStruct struct {
+	Simple map[string]string
+	Paths  map[string]string
+	Other  map[string]float64
+	X      struct {
+		Y struct {
+			Z map[string]bool
+		}
+	}
+}
+
+var mapsTestData = mapsTestStruct{
+	Simple: map[string]string{
+		"one plus one": "two",
+		"next":         "three",
+	},
+	Paths: map[string]string{
+		"/this/is/a/path": "/this/is/also/a/path",
+		"/heloo.txt":      "/tmp/lololo.txt",
+	},
+	Other: map[string]float64{
+		"testing": 3.9999,
+	},
+	X: struct{ Y struct{ Z map[string]bool } }{
+		Y: struct{ Z map[string]bool }{
+			Z: map[string]bool{
+				"is.Nested": true,
+			},
+		},
+	},
+}
+var mapsTestToml = []byte(`
+[Other]
+  "testing" = 3.9999
+
+[Paths]
+  "/heloo.txt" = "/tmp/lololo.txt"
+  "/this/is/a/path" = "/this/is/also/a/path"
+
+[Simple]
+  "next" = "three"
+  "one plus one" = "two"
+
+[X]
+
+  [X.Y]
+
+    [X.Y.Z]
+      "is.Nested" = true
+`)
+
+func TestEncodeQuotedMapKeys(t *testing.T) {
+	var buf bytes.Buffer
+	if err := NewEncoder(&buf).QuoteMapKeys(true).Encode(mapsTestData); err != nil {
+		t.Fatal(err)
+	}
+	result := buf.Bytes()
+	expected := mapsTestToml
+	if !bytes.Equal(result, expected) {
+		t.Errorf("Bad maps marshal: expected\n-----\n%s\n-----\ngot\n-----\n%s\n-----\n", expected, result)
+	}
+}
+
+func TestDecodeQuotedMapKeys(t *testing.T) {
+	result := mapsTestStruct{}
+	err := NewDecoder(bytes.NewBuffer(mapsTestToml)).Decode(&result)
+	expected := mapsTestData
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(result, expected) {
+		t.Errorf("Bad maps unmarshal: expected %v, got %v", expected, result)
+	}
+}
+
+type structArrayNoTag struct {
+	A struct {
+		B []int64
+		C []int64
+	}
+}
+
+func TestMarshalArray(t *testing.T) {
+	expected := []byte(`
+[A]
+  B = [1,2,3]
+  C = [1]
+`)
+
+	m := structArrayNoTag{
+		A: struct {
+			B []int64
+			C []int64
+		}{
+			B: []int64{1, 2, 3},
+			C: []int64{1},
+		},
+	}
+
+	b, err := Marshal(m)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(b, expected) {
+		t.Errorf("Bad arrays marshal: expected\n-----\n%s\n-----\ngot\n-----\n%s\n-----\n", expected, b)
+	}
+}
+
+func TestMarshalArrayOnePerLine(t *testing.T) {
+	expected := []byte(`
+[A]
+  B = [
+    1,
+    2,
+    3,
+  ]
+  C = [1]
+`)
+
+	m := structArrayNoTag{
+		A: struct {
+			B []int64
+			C []int64
+		}{
+			B: []int64{1, 2, 3},
+			C: []int64{1},
+		},
+	}
+
+	var buf bytes.Buffer
+	encoder := NewEncoder(&buf).ArraysWithOneElementPerLine(true)
+	err := encoder.Encode(m)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b := buf.Bytes()
+
+	if !bytes.Equal(b, expected) {
+		t.Errorf("Bad arrays marshal: expected\n-----\n%s\n-----\ngot\n-----\n%s\n-----\n", expected, b)
+	}
+}
+
+var customTagTestToml = []byte(`
+[postgres]
+  password = "bvalue"
+  user = "avalue"
+
+  [[postgres.My]]
+    My = "Foo"
+
+  [[postgres.My]]
+    My = "Baar"
+`)
+
+func TestMarshalCustomTag(t *testing.T) {
+	type TypeC struct {
+		My string
+	}
+	type TypeB struct {
+		AttrA string `file:"user"`
+		AttrB string `file:"password"`
+		My    []TypeC
+	}
+	type TypeA struct {
+		TypeB TypeB `file:"postgres"`
+	}
+
+	ta := []TypeC{{My: "Foo"}, {My: "Baar"}}
+	config := TypeA{TypeB{AttrA: "avalue", AttrB: "bvalue", My: ta}}
+	var buf bytes.Buffer
+	err := NewEncoder(&buf).SetTagName("file").Encode(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := customTagTestToml
+	result := buf.Bytes()
+	if !bytes.Equal(result, expected) {
+		t.Errorf("Bad marshal: expected\n-----\n%s\n-----\ngot\n-----\n%s\n-----\n", expected, result)
+	}
+}
+
+var customCommentTagTestToml = []byte(`
+# db connection
+[postgres]
+
+  # db pass
+  password = "bvalue"
+
+  # db user
+  user = "avalue"
+`)
+
+func TestMarshalCustomComment(t *testing.T) {
+	type TypeB struct {
+		AttrA string `toml:"user" descr:"db user"`
+		AttrB string `toml:"password" descr:"db pass"`
+	}
+	type TypeA struct {
+		TypeB TypeB `toml:"postgres" descr:"db connection"`
+	}
+
+	config := TypeA{TypeB{AttrA: "avalue", AttrB: "bvalue"}}
+	var buf bytes.Buffer
+	err := NewEncoder(&buf).SetTagComment("descr").Encode(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := customCommentTagTestToml
+	result := buf.Bytes()
+	if !bytes.Equal(result, expected) {
+		t.Errorf("Bad marshal: expected\n-----\n%s\n-----\ngot\n-----\n%s\n-----\n", expected, result)
+	}
+}
+
+var customCommentedTagTestToml = []byte(`
+[postgres]
+  # password = "bvalue"
+  # user = "avalue"
+`)
+
+func TestMarshalCustomCommented(t *testing.T) {
+	type TypeB struct {
+		AttrA string `toml:"user" disable:"true"`
+		AttrB string `toml:"password" disable:"true"`
+	}
+	type TypeA struct {
+		TypeB TypeB `toml:"postgres"`
+	}
+
+	config := TypeA{TypeB{AttrA: "avalue", AttrB: "bvalue"}}
+	var buf bytes.Buffer
+	err := NewEncoder(&buf).SetTagCommented("disable").Encode(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := customCommentedTagTestToml
+	result := buf.Bytes()
+	if !bytes.Equal(result, expected) {
+		t.Errorf("Bad marshal: expected\n-----\n%s\n-----\ngot\n-----\n%s\n-----\n", expected, result)
+	}
+}
+
+var customMultilineTagTestToml = []byte(`int_slice = [
+  1,
+  2,
+  3,
+]
+`)
+
+func TestMarshalCustomMultiline(t *testing.T) {
+	type TypeA struct {
+		AttrA []int `toml:"int_slice" mltln:"true"`
+	}
+
+	config := TypeA{AttrA: []int{1, 2, 3}}
+	var buf bytes.Buffer
+	err := NewEncoder(&buf).ArraysWithOneElementPerLine(true).SetTagMultiline("mltln").Encode(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := customMultilineTagTestToml
+	result := buf.Bytes()
+	if !bytes.Equal(result, expected) {
+		t.Errorf("Bad marshal: expected\n-----\n%s\n-----\ngot\n-----\n%s\n-----\n", expected, result)
+	}
+}
+
+var testDocBasicToml = []byte(`
+[document]
+  bool_val = true
+  date_val = 1979-05-27T07:32:00Z
+  float_val = 123.4
+  int_val = 5000
+  string_val = "Bite me"
+  uint_val = 5001
+`)
+
+type testDocCustomTag struct {
+	Doc testDocBasicsCustomTag `file:"document"`
+}
+type testDocBasicsCustomTag struct {
+	Bool       bool      `file:"bool_val"`
+	Date       time.Time `file:"date_val"`
+	Float      float32   `file:"float_val"`
+	Int        int       `file:"int_val"`
+	Uint       uint      `file:"uint_val"`
+	String     *string   `file:"string_val"`
+	unexported int       `file:"shouldntBeHere"`
+}
+
+var testDocCustomTagData = testDocCustomTag{
+	Doc: testDocBasicsCustomTag{
+		Bool:       true,
+		Date:       time.Date(1979, 5, 27, 7, 32, 0, 0, time.UTC),
+		Float:      123.4,
+		Int:        5000,
+		Uint:       5001,
+		String:     &biteMe,
+		unexported: 0,
+	},
+}
+
+func TestUnmarshalCustomTag(t *testing.T) {
+	buf := bytes.NewBuffer(testDocBasicToml)
+
+	result := testDocCustomTag{}
+	err := NewDecoder(buf).SetTagName("file").Decode(&result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := testDocCustomTagData
+	if !reflect.DeepEqual(result, expected) {
+		resStr, _ := json.MarshalIndent(result, "", "  ")
+		expStr, _ := json.MarshalIndent(expected, "", "  ")
+		t.Errorf("Bad unmarshal: expected\n-----\n%s\n-----\ngot\n-----\n%s\n-----\n", expStr, resStr)
+
+	}
+}
+
+func TestUnmarshalMap(t *testing.T) {
+	m := make(map[string]int)
+	m["a"] = 1
+
+	err := Unmarshal(basicTestToml, m)
+	if err.Error() != "Only a pointer to struct can be unmarshaled from TOML" {
+		t.Fail()
+	}
+}
+
+func TestMarshalMap(t *testing.T) {
+	m := make(map[string]int)
+	m["a"] = 1
+
+	var buf bytes.Buffer
+	err := NewEncoder(&buf).Encode(m)
+	if err.Error() != "Only a struct can be marshaled to TOML" {
+		t.Fail()
 	}
 }
