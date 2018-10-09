@@ -118,7 +118,7 @@ func (t *Tree) writeTo(w io.Writer, indent, keyspace string, bytesCount int64) (
 			return bytesCount, err
 		}
 
-		kvRepr := indent + k + " = " + repr + "\n"
+		kvRepr := indent + k + "=" + repr + "\n"
 		writtenBytesCount, err := w.Write([]byte(kvRepr))
 		bytesCount += int64(writtenBytesCount)
 		if err != nil {
