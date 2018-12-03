@@ -7,7 +7,7 @@ package query
 
 import (
 	"fmt"
-	"github.com/pelletier/go-toml"
+	"github.com/winstonprivacyinc/go-toml"
 	"strconv"
 	"strings"
 	"unicode/utf8"

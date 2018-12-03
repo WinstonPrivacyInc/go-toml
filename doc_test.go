@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log"
 
-	toml "github.com/pelletier/go-toml"
+	toml "github.com/winstonprivacyinc/go-toml"
 )
 
 func Example_tree() {
